@@ -16,10 +16,20 @@ html, body { height: 100%; font-family: Arial, Helvetica, sans-serif; }
 .active { display: block; }
 
 #home {
-  background: linear-gradient(rgba(0,0,0,0.3), rgba(0,0,0,0.3)),
-              url("https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcS1Dtx0rxXaILiXHJCiFvgr9Fb4oS4FX-UC7CMB1xM3SE4jG_WQ-6lwJYs&s=10") center/cover no-repeat;
-  display: flex; flex-direction: column; justify-content: center; align-items: center;
-  text-align: center; color: white;
+    background:
+        linear-gradient(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.45)),
+        url("Land pic.png");
+
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    color: white;
 }
 #home h1 { font-size: clamp(32px, 6vw, 55px); color: #ffcc00; text-shadow: 3px 3px 8px black; margin-bottom: 15px; }
 #home p { font-size: 20px; margin: 0 20px 30px; max-width: 600px; }
@@ -44,20 +54,34 @@ html, body { height: 100%; font-family: Arial, Helvetica, sans-serif; }
 .navbar a:hover { background: #0056b3; }
 
 #about {
-  background: linear-gradient(rgba(0,0,0,0.3), rgba(0,0,0,0.3)),
-              url("https://pbs.twimg.com/media/FKpr4LvWYAAnZQZ.jpg") center/cover;
-  color: white;
+    background:
+        linear-gradient(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.45)),
+        url("About.png");
+
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
 }
 .overlay { height: 100%; padding: 80px 40px; line-height: 1.8; max-width: 800px; }
-.overlay h1 { margin-bottom: 20px; color: #f4eac5; }
+.overlay h1 {
+    font-size: 48px;
+    margin-bottom: 25px;
+    color: #f4eac5;
+    text-shadow: 2px 2px 5px rgba(0,0,0,0.7);
+}
+.overlay p {
+    font-size: 24px;
+    line-height: 1.7;
+    color: white;
+}
 .overlay button, #contact button {
-  margin-top: 25px; padding: 12px 25px; background: #dc3545; color: white;
+  margin-top: 30px; padding: 15px 30px; background: #dc3545; color: white;
   border: none; border-radius: 5px; cursor: pointer; font-weight: bold;
 }
 
 #contact { 
   background:linear-gradient(rgba(0,0,0,0.3), rgba(0,0,0,0.3)),
-              url("https://ltimepropertiesltd.com/_next/image?url=%2Fhero-bg.png&w=3840&q=75") center/cover;
+              url("Contact.png") center/cover;
   color: white; padding: 100px 40px; }
 #contact h1 { color: #ffcc00; margin-bottom: 25px; }
 #contact p { font-size: 18px; line-height: 2; }
