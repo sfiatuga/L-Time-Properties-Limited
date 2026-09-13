@@ -492,7 +492,7 @@ body{
 
     <div class="estate-title">
       <span class="location-icon"></span>
-      <span>ELIZ COURT</span>
+      <span>TIME CITY</span>
     </div>
   </div>
 
@@ -857,71 +857,52 @@ function findEntrances(data) {
   entranceData = [];
 
   data.features.forEach(feature => {
-    const attr = (feature.properties && feature.properties.Attribute) || '';
-    if (attr.toLowerCase() !== 'entrance') return;
+    const attr = String(feature.properties?.Attribute || '').trim().toLowerCase();
+    if (attr !== 'entrance' || !feature.geometry) return;
 
-    const coords = feature.geometry.coordinates;
+    const geom = feature.geometry;
+    const coords =
+      geom.type === 'LineString'
+        ? geom.coordinates
+        : (geom.type === 'MultiLineString' && geom.coordinates[0]
+            ? geom.coordinates[0]
+            : null);
+
     if (!coords || coords.length < 2) return;
 
     const first = coords[0];
     const last  = coords[coords.length - 1];
 
-    const firstNode = closestGraphNode(first[1], first[0]).node;
-    const lastNode  = closestGraphNode(last[1], last[0]).node;
+    const firstRoad = closestPointOnNonEntranceRoads(first[1], first[0]);
+    const lastRoad  = closestPointOnNonEntranceRoads(last[1], last[0]);
 
-    const firstDeg = firstNode ? firstNode.neighbors.length : 0;
-    const lastDeg  = lastNode  ? lastNode.neighbors.length  : 0;
+    let inside, outside;
 
-    let outside, inside;
-
-    if (firstDeg < lastDeg) {
-      outside = { lat: first[1], lng: first[0] };
-      inside  = { lat: last[1],  lng: last[0] };
-    } else if (lastDeg < firstDeg) {
-      outside = { lat: last[1],  lng: last[0] };
-      inside  = { lat: first[1], lng: first[0] };
-    } else {
-      const center = calculateRoadCenter();
-      const dFirst = haversine(first[1], first[0], center.lat, center.lng);
-      const dLast = haversine(last[1], last[0], center.lat, center.lng);
-
-      if (dFirst > dLast) {
-        outside = { lat: first[1], lng: first[0] };
-        inside  = { lat: last[1], lng: last[0] };
+    if (firstRoad && lastRoad) {
+      // Endpoint closer to the estate road network is the inside endpoint.
+      if (firstRoad.distance <= lastRoad.distance) {
+        inside  = {lat:first[1], lng:first[0]};
+        outside = {lat:last[1], lng:last[0]};
       } else {
-        outside = { lat: last[1], lng: last[0] };
-        inside  = { lat: first[1], lng: first[0] };
+        inside  = {lat:last[1], lng:last[0]};
+        outside = {lat:first[1], lng:first[0]};
       }
+    } else {
+      // Conservative fallback if road geometry is unavailable.
+      inside  = {lat:first[1], lng:first[0]};
+      outside = {lat:last[1], lng:last[0]};
     }
 
     entranceData.push({
-      id: feature.id || entranceData.length,
+      id: feature.id ?? entranceData.length,
       name: 'Entrance ' + (entranceData.length + 1),
       outside,
       inside,
-      feature
+      geometry: coords
     });
   });
 
-  console.log('Entrances detected:', entranceData.length);
-}
-
-function calculateRoadCenter() {
-  if (graphNodes.length === 0) {
-    return { lat: 5.9348, lng: 0.1933 };
-  }
-
-  let lat = 0, lng = 0;
-
-  graphNodes.forEach(n => {
-    lat += n.lat;
-    lng += n.lng;
-  });
-
-  return {
-    lat: lat / graphNodes.length,
-    lng: lng / graphNodes.length
-  };
+  console.log('Detected entrance road features:', entranceData);
 }
 
 /* ==========================================================
@@ -1102,18 +1083,28 @@ async function evaluateAllEntrances(
           entrance.outside.lng
         );
 
-      const entranceNode =
-        closestGraphNode(
-          entrance.outside.lat,
-          entrance.outside.lng
-        ).node;
-
-      const estatePath =
-        AStar(
-          entranceNode,
-          destinationNode
+      const entranceCandidates =
+        roadPointCandidates(
+          entrance.inside.lat,
+          entrance.inside.lng,
+          30,
+          10
         );
 
+      let estatePath = null;
+      let entranceNode = null;
+
+      for (const candidate of entranceCandidates) {
+        const node = snapPointToGraph(candidate);
+        if (!node) continue;
+
+        const candidatePath = AStar(node, destinationNode);
+        if (candidatePath) {
+          estatePath = candidatePath;
+          entranceNode = node;
+          break;
+        }
+      }
       if (!estatePath) continue;
 
       const estateDistance =
@@ -2059,6 +2050,147 @@ function finishRouteCycle(success) {
   }
 }
 
+
+/* ==========================================================
+   ROBUST WAYPOINT ROUTING HELPERS
+   Each plot corner remains a real navigation waypoint, but
+   the road connection for that waypoint is allowed to use
+   several nearby road candidates instead of only the single
+   globally-closest road segment.
+========================================================== */
+
+function roadPointCandidates(lat, lng, maxDistance = 40, maxCandidates = 12) {
+  if (!roadData) return [];
+
+  const target = {lat, lng};
+  const candidates = [];
+
+  roadData.features.forEach(feature => {
+    if (!feature.geometry) return;
+    const attr = String(feature.properties?.Attribute || '').toLowerCase();
+    if (attr === 'entrance') return;
+
+    const geom = feature.geometry;
+    const lines =
+      geom.type === 'LineString' ? [geom.coordinates] :
+      geom.type === 'MultiLineString' ? geom.coordinates : [];
+
+    lines.forEach(coords => {
+      for (let i = 0; i < coords.length - 1; i++) {
+        const A = {lat: coords[i][1], lng: coords[i][0]};
+        const B = {lat: coords[i + 1][1], lng: coords[i + 1][0]};
+        const point = closestPointOnSegment(A, B, target);
+        const distance = haversine(lat, lng, point.lat, point.lng);
+
+        if (distance <= maxDistance) {
+          candidates.push({
+            point,
+            distance,
+            segmentStart: A,
+            segmentEnd: B,
+            featureId: feature.id ?? null
+          });
+        }
+      }
+    });
+  });
+
+  // De-duplicate almost identical candidates.
+  candidates.sort((a,b) => a.distance - b.distance);
+
+  const unique = [];
+  for (const c of candidates) {
+    const duplicate = unique.some(u =>
+      haversine(u.point.lat, u.point.lng, c.point.lat, c.point.lng) < 0.75
+    );
+    if (!duplicate) unique.push(c);
+    if (unique.length >= maxCandidates) break;
+  }
+
+  return unique;
+}
+
+function routeBetweenWaypointCandidates(startLat, startLng, endLat, endLng) {
+  const startCandidates = roadPointCandidates(startLat, startLng, 50, 14);
+  const endCandidates   = roadPointCandidates(endLat, endLng, 50, 14);
+
+  if (!startCandidates.length || !endCandidates.length) {
+    return null;
+  }
+
+  let best = null;
+
+  for (const s of startCandidates) {
+    const startNode = snapPointToGraph(s);
+    if (!startNode) continue;
+
+    for (const e of endCandidates) {
+      const endNode = snapPointToGraph(e);
+      if (!endNode) continue;
+
+      const path = AStar(startNode, endNode);
+      if (!path) continue;
+
+      const roadDistance = calculatePathDistance(path);
+      const accessDistance =
+        haversine(startLat, startLng, s.point.lat, s.point.lng) +
+        haversine(endLat, endLng, e.point.lat, e.point.lng);
+
+      const score = roadDistance + accessDistance;
+
+      if (!best || score < best.score) {
+        best = {
+          path,
+          startSnap: s.point,
+          endSnap: e.point,
+          distance: roadDistance + accessDistance,
+          score
+        };
+      }
+    }
+  }
+
+  return best;
+}
+
+/* Find the estate-road-connected end of an Entrance feature.
+   We deliberately do NOT infer inside/outside from node degree.
+   The endpoint closest to a NON-ENTRANCE estate road is the
+   estate-side endpoint. */
+function closestPointOnNonEntranceRoads(targetLat, targetLng) {
+  if (!roadData) return null;
+
+  const target = {lat: targetLat, lng: targetLng};
+  let best = null;
+
+  roadData.features.forEach(feature => {
+    if (!feature.geometry) return;
+
+    const attr = String(feature.properties?.Attribute || '').toLowerCase();
+    if (attr === 'entrance') return;
+
+    const geom = feature.geometry;
+    const lines =
+      geom.type === 'LineString' ? [geom.coordinates] :
+      geom.type === 'MultiLineString' ? geom.coordinates : [];
+
+    lines.forEach(coords => {
+      for (let i = 0; i < coords.length - 1; i++) {
+        const A = {lat: coords[i][1], lng: coords[i][0]};
+        const B = {lat: coords[i + 1][1], lng: coords[i + 1][0]};
+        const point = closestPointOnSegment(A, B, target);
+        const distance = haversine(targetLat, targetLng, point.lat, point.lng);
+
+        if (!best || distance < best.distance) {
+          best = {point, distance};
+        }
+      }
+    });
+  });
+
+  return best;
+}
+
 /* ==========================================================
    NEW: ROUTE BETWEEN TWO PLOT CORNERS
 ========================================================== */
@@ -2066,59 +2198,25 @@ function routeBetweenPlotCorners(
   startCorner,
   endCorner
 ) {
+  const result = routeBetweenWaypointCandidates(
+    startCorner[1], startCorner[0],
+    endCorner[1], endCorner[0]
+  );
 
-  const startSnap =
-    closestPointOnRoads(
-      startCorner[1],
-      startCorner[0]
-    );
-
-  const endSnap =
-    closestPointOnRoads(
-      endCorner[1],
-      endCorner[0]
-    );
-
-  if (!startSnap || !endSnap)
+  if (!result) {
     return {
-      path:null,
-      distance:0,
-      startSnap:null,
-      endSnap:null
+      path: null,
+      distance: 0,
+      startSnap: null,
+      endSnap: null
     };
-
-  const startNode = snapPointToGraph(startSnap);
-
-  const endNode = snapPointToGraph(endSnap);
-
-  if (!startNode || !endNode)
-    return {
-      path:null,
-      distance:0,
-      startSnap:startSnap.point,
-      endSnap:endSnap.point
-    };
-
-  const path =
-    AStar(
-      startNode,
-      endNode
-    );
-
-  if (!path)
-    return {
-      path:null,
-      distance:0,
-      startSnap:startSnap.point,
-      endSnap:endSnap.point
-    };
+  }
 
   return {
-    path,
-    distance:
-      calculatePathDistance(path),
-    startSnap:startSnap.point,
-    endSnap:endSnap.point
+    path: result.path,
+    distance: result.distance,
+    startSnap: result.startSnap,
+    endSnap: result.endSnap
   };
 }
 
@@ -2202,19 +2300,44 @@ async function routeThroughAllCorners(
       'Could not connect Corner 1 to the estate road.'
     );
 
-  const entranceNode =
-    closestGraphNode(
-      best.entrance.outside.lat,
-      best.entrance.outside.lng
-    ).node;
+  const firstCandidates = roadPointCandidates(
+    best.entrance.inside.lat,
+    best.entrance.inside.lng,
+    30,
+    10
+  );
 
-  const firstNode = snapPointToGraph(firstSnap);
+  let firstPath = null;
+  let entranceNode = null;
+  let firstChosenSnap = null;
 
-  const firstPath =
-    AStar(
-      entranceNode,
-      firstNode
-    );
+  const firstCornerCandidates = roadPointCandidates(
+    firstCorner[1],
+    firstCorner[0],
+    50,
+    14
+  );
+
+  for (const sc of firstCandidates) {
+    const sNode = snapPointToGraph(sc);
+    if (!sNode) continue;
+
+    for (const ec of firstCornerCandidates) {
+      const eNode = snapPointToGraph(ec);
+      if (!eNode) continue;
+
+      const p = AStar(sNode, eNode);
+      if (p) {
+        firstPath = p;
+        entranceNode = sNode;
+        firstChosenSnap = ec.point;
+        break;
+      }
+    }
+    if (firstPath) break;
+  }
+
+  const firstNode = firstPath ? firstPath[firstPath.length - 1] : null;
 
   if (!firstPath)
     throw new Error(
@@ -2246,7 +2369,7 @@ async function routeThroughAllCorners(
   routeLayers.push(firstLine);
 
   drawCornerAccess(
-    firstSnap.point,
+    firstChosenSnap || firstSnap.point,
     firstCorner
   );
 
@@ -2294,7 +2417,9 @@ async function routeThroughAllCorners(
       console.warn(
         `Could not route Corner ${i + 1} to Corner ${i + 2}`
       );
-      continue;
+      throw new Error(
+        `No connected estate-road path between Plot Corner ${i + 1} and Plot Corner ${i + 2}.`
+      );
     }
 
     const coords =
@@ -2519,7 +2644,7 @@ fetch('A13_Road.json')
 
     if (!r.ok)
       throw new Error(
-        'A0_Roads file could not be loaded'
+        'A13_Road(1).json could not be loaded'
       );
 
     return r.json();
@@ -2572,7 +2697,7 @@ fetch('A13.json')
 
     if (!r.ok)
       throw new Error(
-        'A13.json could not be loaded'
+        'A14.json could not be loaded'
       );
 
     return r.json();
@@ -2671,7 +2796,7 @@ fetch('A13.json')
     console.error(err);
 
     alert(
-      'Error loading A13.json – please use Live Server.'
+      'Error loading A14.json – please use Live Server.'
     );
 
   });
