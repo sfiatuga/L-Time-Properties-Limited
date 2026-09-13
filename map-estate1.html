@@ -6,6 +6,7 @@
 <title>ELIZ COURT | L-Time Properties</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate.css">
 
 <style>
 *{ margin:0; padding:0; box-sizing:border-box; }
@@ -173,6 +174,24 @@ body{
 }
 
 /* ===== MAP ===== */
+/* ===== MAP INTERACTION / ROTATION ===== */
+.leaflet-rotate-reset{
+  margin-top:10px !important;
+  background:#fff;
+  border-radius:4px;
+  box-shadow:0 1px 5px rgba(0,0,0,.35);
+}
+.leaflet-rotate-reset a{
+  width:30px;
+  height:30px;
+  line-height:30px;
+  text-align:center;
+  font-size:18px;
+  font-weight:bold;
+  color:#003366;
+  text-decoration:none;
+}
+
 
 
 /* ==========================================================
@@ -599,12 +618,47 @@ body{
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate.js"></script>
 
 <script>
 /* ==========================================================
    MAP
 ========================================================== */
-const map = L.map('map').setView([5.9348, 0.1933], 18);
+const map = L.map('map', {
+  rotate: true,
+  touchRotate: true,
+  shiftKeyRotate: true,
+  dragging: true,
+  scrollWheelZoom: true,
+  doubleClickZoom: true,
+  boxZoom: true,
+  keyboard: true,
+  zoomControl: true
+}).setView([5.9348, 0.1933], 18);
+
+/* Explicitly keep all normal Leaflet interactions enabled. */
+map.dragging.enable();
+map.scrollWheelZoom.enable();
+map.doubleClickZoom.enable();
+map.boxZoom.enable();
+map.keyboard.enable();
+
+/* North/reset button for the rotatable map. */
+const rotateResetControl = L.control({position:'topleft'});
+rotateResetControl.onAdd = function(){
+  const div = L.DomUtil.create('div','leaflet-bar leaflet-rotate-reset');
+  const a = L.DomUtil.create('a','',div);
+  a.href='#';
+  a.title='Reset map to north';
+  a.innerHTML='N';
+  L.DomEvent.disableClickPropagation(div);
+  L.DomEvent.on(a,'click',function(e){
+    L.DomEvent.stop(e);
+    if (typeof map.setBearing === 'function') map.setBearing(0);
+  });
+  return div;
+};
+rotateResetControl.addTo(map);
 
 /* ==========================================================
    NEW: MULTIPLE BASE LAYERS
@@ -713,6 +767,9 @@ let selectedPlotCorners = [];
 let lastRoutedCoord = null;
 let currentRoutePolyline = [];
 let cornerMarkers = [];
+let publicRouteLine = null;
+let publicRouteCoords = [];
+let publicRouteProgressIndex = 0;
 
 /* ==========================================================
    HELPERS
@@ -1259,6 +1316,9 @@ function drawPublicRoute(route) {
     }).addTo(map);
 
   routeLayers.push(line);
+  publicRouteLine = line;
+  publicRouteCoords = coords.slice();
+  publicRouteProgressIndex = 0;
 
   return coords;
 }
@@ -2130,6 +2190,10 @@ function finishRouteCycle(success) {
     stopRouteTracking();
   }
 
+  if (success) {
+    startRouteTracking();
+  }
+
   if (resumeVoiceAfterReroute) {
     resumeVoiceAfterReroute = false;
     if (success) {
@@ -2526,6 +2590,9 @@ function clearRoute() {
      new route is drawn, via finishRouteCycle(). */
   stopRouteTracking();
   currentRoutePolyline = [];
+  publicRouteLine = null;
+  publicRouteCoords = [];
+  publicRouteProgressIndex = 0;
 }
 
 /*
@@ -2537,9 +2604,6 @@ function clearRoute() {
 function fullyClearRoute() {
   clearRoute();
   stopLiveUserLocation();
-  lastRoutedCoord = null;
-}function fullyClearRoute() {
-  clearRoute();
   lastRoutedCoord = null;
 }
 
@@ -2996,6 +3060,65 @@ document.getElementById(
 
 
 /* ==========================================================
+   LIVE ROUTE PROGRESS
+
+   The active blue public-road route is shortened as the user
+   moves. The travelled section is removed; only the remaining
+   route is displayed.
+========================================================== */
+function closestPointOnPolyline(lat, lng, coords, startIndex = 0) {
+  if (!coords || coords.length < 2) return null;
+
+  let best = null;
+  let bestDistance = Infinity;
+  let bestIndex = startIndex;
+
+  for (let i = Math.max(0, startIndex); i < coords.length - 1; i++) {
+    const A = {lat: coords[i][0], lng: coords[i][1]};
+    const B = {lat: coords[i+1][0], lng: coords[i+1][1]};
+    const P = {lat, lng};
+    const pt = closestPointOnSegment(A, B, P);
+    const d = haversine(lat, lng, pt.lat, pt.lng);
+
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = pt;
+      bestIndex = i;
+    }
+  }
+
+  return best ? {point:best, distance:bestDistance, index:bestIndex} : null;
+}
+
+function updateRemainingPublicRoute(lat, lng) {
+  if (!publicRouteLine || publicRouteCoords.length < 2) return;
+
+  const match = closestPointOnPolyline(
+    lat, lng, publicRouteCoords, publicRouteProgressIndex
+  );
+
+  if (!match) return;
+
+  /* Only advance forward along the route. This prevents a noisy GPS
+     reading from making the blue line jump backwards. */
+  if (match.index < publicRouteProgressIndex) return;
+
+  publicRouteProgressIndex = match.index;
+
+  const remaining = [
+    [match.point.lat, match.point.lng],
+    ...publicRouteCoords.slice(match.index + 1)
+  ];
+
+  if (remaining.length < 2) {
+    publicRouteLine.setLatLngs([]);
+    return;
+  }
+
+  publicRouteLine.setLatLngs(remaining);
+}
+
+/* ==========================================================
    LIVE USER LOCATION
 ========================================================== */
 function calculateMovementBearing(lat1, lng1, lat2, lng2) {
@@ -3089,6 +3212,9 @@ function updateLiveUserLocation(position) {
   previousUserLng = lng;
 
   createLiveUserMarker(lat, lng);
+
+  /* Shorten the active blue route to the remaining section. */
+  updateRemainingPublicRoute(lat, lng);
 
   if (!accuracyCircle) {
     accuracyCircle = L.circle([lat, lng], {
@@ -3280,6 +3406,9 @@ async function(coord) {
 
         /* Live user marker */
         createLiveUserMarker(userLat, userLng);
+
+        /* Shorten the active blue route as soon as the first GPS fix arrives. */
+        updateRemainingPublicRoute(userLat, userLng);
 
         /* Accuracy circle */
         if (!accuracyCircle) {
