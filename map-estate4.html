@@ -6,6 +6,7 @@
 <title>ELIZ COURT | L-Time Properties</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate.css">
 
 <style>
 *{ margin:0; padding:0; box-sizing:border-box; }
@@ -173,6 +174,24 @@ body{
 }
 
 /* ===== MAP ===== */
+/* ===== MAP INTERACTION / ROTATION ===== */
+.leaflet-rotate-reset{
+  margin-top:10px !important;
+  background:#fff;
+  border-radius:4px;
+  box-shadow:0 1px 5px rgba(0,0,0,.35);
+}
+.leaflet-rotate-reset a{
+  width:30px;
+  height:30px;
+  line-height:30px;
+  text-align:center;
+  font-size:18px;
+  font-weight:bold;
+  color:#003366;
+  text-decoration:none;
+}
+
 
 
 /* ==========================================================
@@ -471,6 +490,47 @@ body{
   font-weight:bold;
   box-shadow:0 2px 5px rgba(0,0,0,0.4);
 }
+
+/* ==========================================================
+   LIVE GPS LOCATION MARKER
+   Blue dot + translucent movement-direction cone.
+   The cone is driven by GPS movement, not phone orientation.
+========================================================== */
+.gps-location-marker{
+  position:relative;
+  width:72px;
+  height:72px;
+  transform-origin:50% 50%;
+  pointer-events:none;
+}
+
+.gps-direction{
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:0;
+  height:0;
+  border-left:30px solid transparent;
+  border-right:30px solid transparent;
+  border-bottom:58px solid rgba(30,100,255,0.22);
+  transform:translate(-50%,-100%) rotate(0deg);
+  transform-origin:50% 100%;
+  filter:drop-shadow(0 1px 2px rgba(0,0,0,0.08));
+}
+
+.gps-dot{
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:30px;
+  height:30px;
+  transform:translate(-50%,-50%);
+  background:#1a73e8;
+  border:4px solid #fff;
+  border-radius:50%;
+  box-shadow:0 1px 5px rgba(0,0,0,0.35);
+}
+
 </style>
 </head>
 <body>
@@ -558,12 +618,47 @@ body{
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate.js"></script>
 
 <script>
 /* ==========================================================
    MAP
 ========================================================== */
-const map = L.map('map').setView([5.9348, 0.1933], 18);
+const map = L.map('map', {
+  rotate: true,
+  touchRotate: true,
+  shiftKeyRotate: true,
+  dragging: true,
+  scrollWheelZoom: true,
+  doubleClickZoom: true,
+  boxZoom: true,
+  keyboard: true,
+  zoomControl: true
+}).setView([5.9348, 0.1933], 18);
+
+/* Explicitly keep all normal Leaflet interactions enabled. */
+map.dragging.enable();
+map.scrollWheelZoom.enable();
+map.doubleClickZoom.enable();
+map.boxZoom.enable();
+map.keyboard.enable();
+
+/* North/reset button for the rotatable map. */
+const rotateResetControl = L.control({position:'topleft'});
+rotateResetControl.onAdd = function(){
+  const div = L.DomUtil.create('div','leaflet-bar leaflet-rotate-reset');
+  const a = L.DomUtil.create('a','',div);
+  a.href='#';
+  a.title='Reset map to north';
+  a.innerHTML='N';
+  L.DomEvent.disableClickPropagation(div);
+  L.DomEvent.on(a,'click',function(e){
+    L.DomEvent.stop(e);
+    if (typeof map.setBearing === 'function') map.setBearing(0);
+  });
+  return div;
+};
+rotateResetControl.addTo(map);
 
 /* ==========================================================
    NEW: MULTIPLE BASE LAYERS
@@ -630,6 +725,32 @@ let destinationMarker = null;
 let entranceMarker = null;
 let snapMarker = null;
 
+let userLocationWatchId = null;
+let previousUserLat = null;
+let previousUserLng = null;
+let movementHeading = 0;
+const MOVEMENT_THRESHOLD_METERS = 0.25;
+
+/* Estate-only navigation state. A small hysteresis band prevents
+   noisy GPS readings from rapidly switching between public and
+   estate-only routing while the user is near an estate road. */
+let navigationInsideEstate = false;
+const ESTATE_ENTER_DISTANCE_METERS = 30;
+const ESTATE_EXIT_DISTANCE_METERS = 45;
+
+function isUserInsideEstate(userLat, userLng) {
+  const snap = closestPointOnRoads(userLat, userLng);
+  if (!snap) return false;
+
+  const threshold = navigationInsideEstate
+    ? ESTATE_EXIT_DISTANCE_METERS
+    : ESTATE_ENTER_DISTANCE_METERS;
+
+  navigationInsideEstate = snap.distance <= threshold;
+  return navigationInsideEstate;
+}
+
+
 const SNAP_TOLERANCE = 0.6;
 
 /* ==========================================================
@@ -646,6 +767,9 @@ let selectedPlotCorners = [];
 let lastRoutedCoord = null;
 let currentRoutePolyline = [];
 let cornerMarkers = [];
+let publicRouteLine = null;
+let publicRouteCoords = [];
+let publicRouteProgressIndex = 0;
 
 /* ==========================================================
    HELPERS
@@ -857,52 +981,71 @@ function findEntrances(data) {
   entranceData = [];
 
   data.features.forEach(feature => {
-    const attr = String(feature.properties?.Attribute || '').trim().toLowerCase();
-    if (attr !== 'entrance' || !feature.geometry) return;
+    const attr = (feature.properties && feature.properties.Attribute) || '';
+    if (attr.toLowerCase() !== 'entrance') return;
 
-    const geom = feature.geometry;
-    const coords =
-      geom.type === 'LineString'
-        ? geom.coordinates
-        : (geom.type === 'MultiLineString' && geom.coordinates[0]
-            ? geom.coordinates[0]
-            : null);
-
+    const coords = feature.geometry.coordinates;
     if (!coords || coords.length < 2) return;
 
     const first = coords[0];
     const last  = coords[coords.length - 1];
 
-    const firstRoad = closestPointOnNonEntranceRoads(first[1], first[0]);
-    const lastRoad  = closestPointOnNonEntranceRoads(last[1], last[0]);
+    const firstNode = closestGraphNode(first[1], first[0]).node;
+    const lastNode  = closestGraphNode(last[1], last[0]).node;
 
-    let inside, outside;
+    const firstDeg = firstNode ? firstNode.neighbors.length : 0;
+    const lastDeg  = lastNode  ? lastNode.neighbors.length  : 0;
 
-    if (firstRoad && lastRoad) {
-      // Endpoint closer to the estate road network is the inside endpoint.
-      if (firstRoad.distance <= lastRoad.distance) {
-        inside  = {lat:first[1], lng:first[0]};
-        outside = {lat:last[1], lng:last[0]};
-      } else {
-        inside  = {lat:last[1], lng:last[0]};
-        outside = {lat:first[1], lng:first[0]};
-      }
+    let outside, inside;
+
+    if (firstDeg < lastDeg) {
+      outside = { lat: first[1], lng: first[0] };
+      inside  = { lat: last[1],  lng: last[0] };
+    } else if (lastDeg < firstDeg) {
+      outside = { lat: last[1],  lng: last[0] };
+      inside  = { lat: first[1], lng: first[0] };
     } else {
-      // Conservative fallback if road geometry is unavailable.
-      inside  = {lat:first[1], lng:first[0]};
-      outside = {lat:last[1], lng:last[0]};
+      const center = calculateRoadCenter();
+      const dFirst = haversine(first[1], first[0], center.lat, center.lng);
+      const dLast = haversine(last[1], last[0], center.lat, center.lng);
+
+      if (dFirst > dLast) {
+        outside = { lat: first[1], lng: first[0] };
+        inside  = { lat: last[1], lng: last[0] };
+      } else {
+        outside = { lat: last[1], lng: last[0] };
+        inside  = { lat: first[1], lng: first[0] };
+      }
     }
 
     entranceData.push({
-      id: feature.id ?? entranceData.length,
+      id: feature.id || entranceData.length,
       name: 'Entrance ' + (entranceData.length + 1),
       outside,
       inside,
-      geometry: coords
+      feature
     });
   });
 
-  console.log('Detected entrance road features:', entranceData);
+  console.log('Entrances detected:', entranceData.length);
+}
+
+function calculateRoadCenter() {
+  if (graphNodes.length === 0) {
+    return { lat: 5.9348, lng: 0.1933 };
+  }
+
+  let lat = 0, lng = 0;
+
+  graphNodes.forEach(n => {
+    lat += n.lat;
+    lng += n.lng;
+  });
+
+  return {
+    lat: lat / graphNodes.length,
+    lng: lng / graphNodes.length
+  };
 }
 
 /* ==========================================================
@@ -978,6 +1121,18 @@ function reconstructPath(cameFrom, currentId) {
   }
 
   return path.reverse();
+}
+
+function calculatePolylineDistance(coords) {
+  if (!coords || coords.length < 2) return 0;
+  let total = 0;
+  for (let i = 1; i < coords.length; i++) {
+    total += haversine(
+      coords[i - 1][0], coords[i - 1][1],
+      coords[i][0], coords[i][1]
+    );
+  }
+  return total;
 }
 
 function calculatePathDistance(path) {
@@ -1083,28 +1238,18 @@ async function evaluateAllEntrances(
           entrance.outside.lng
         );
 
-      const entranceCandidates =
-        roadPointCandidates(
-          entrance.inside.lat,
-          entrance.inside.lng,
-          30,
-          10
+      const entranceNode =
+        closestGraphNode(
+          entrance.outside.lat,
+          entrance.outside.lng
+        ).node;
+
+      const estatePath =
+        AStar(
+          entranceNode,
+          destinationNode
         );
 
-      let estatePath = null;
-      let entranceNode = null;
-
-      for (const candidate of entranceCandidates) {
-        const node = snapPointToGraph(candidate);
-        if (!node) continue;
-
-        const candidatePath = AStar(node, destinationNode);
-        if (candidatePath) {
-          estatePath = candidatePath;
-          entranceNode = node;
-          break;
-        }
-      }
       if (!estatePath) continue;
 
       const estateDistance =
@@ -1171,6 +1316,9 @@ function drawPublicRoute(route) {
     }).addTo(map);
 
   routeLayers.push(line);
+  publicRouteLine = line;
+  publicRouteCoords = coords.slice();
+  publicRouteProgressIndex = 0;
 
   return coords;
 }
@@ -2042,153 +2190,16 @@ function finishRouteCycle(success) {
     stopRouteTracking();
   }
 
+  if (success) {
+    startRouteTracking();
+  }
+
   if (resumeVoiceAfterReroute) {
     resumeVoiceAfterReroute = false;
     if (success) {
       startVoiceGuidance();
     }
   }
-}
-
-
-/* ==========================================================
-   ROBUST WAYPOINT ROUTING HELPERS
-   Each plot corner remains a real navigation waypoint, but
-   the road connection for that waypoint is allowed to use
-   several nearby road candidates instead of only the single
-   globally-closest road segment.
-========================================================== */
-
-function roadPointCandidates(lat, lng, maxDistance = 40, maxCandidates = 12) {
-  if (!roadData) return [];
-
-  const target = {lat, lng};
-  const candidates = [];
-
-  roadData.features.forEach(feature => {
-    if (!feature.geometry) return;
-    const attr = String(feature.properties?.Attribute || '').toLowerCase();
-    if (attr === 'entrance') return;
-
-    const geom = feature.geometry;
-    const lines =
-      geom.type === 'LineString' ? [geom.coordinates] :
-      geom.type === 'MultiLineString' ? geom.coordinates : [];
-
-    lines.forEach(coords => {
-      for (let i = 0; i < coords.length - 1; i++) {
-        const A = {lat: coords[i][1], lng: coords[i][0]};
-        const B = {lat: coords[i + 1][1], lng: coords[i + 1][0]};
-        const point = closestPointOnSegment(A, B, target);
-        const distance = haversine(lat, lng, point.lat, point.lng);
-
-        if (distance <= maxDistance) {
-          candidates.push({
-            point,
-            distance,
-            segmentStart: A,
-            segmentEnd: B,
-            featureId: feature.id ?? null
-          });
-        }
-      }
-    });
-  });
-
-  // De-duplicate almost identical candidates.
-  candidates.sort((a,b) => a.distance - b.distance);
-
-  const unique = [];
-  for (const c of candidates) {
-    const duplicate = unique.some(u =>
-      haversine(u.point.lat, u.point.lng, c.point.lat, c.point.lng) < 0.75
-    );
-    if (!duplicate) unique.push(c);
-    if (unique.length >= maxCandidates) break;
-  }
-
-  return unique;
-}
-
-function routeBetweenWaypointCandidates(startLat, startLng, endLat, endLng) {
-  const startCandidates = roadPointCandidates(startLat, startLng, 50, 14);
-  const endCandidates   = roadPointCandidates(endLat, endLng, 50, 14);
-
-  if (!startCandidates.length || !endCandidates.length) {
-    return null;
-  }
-
-  let best = null;
-
-  for (const s of startCandidates) {
-    const startNode = snapPointToGraph(s);
-    if (!startNode) continue;
-
-    for (const e of endCandidates) {
-      const endNode = snapPointToGraph(e);
-      if (!endNode) continue;
-
-      const path = AStar(startNode, endNode);
-      if (!path) continue;
-
-      const roadDistance = calculatePathDistance(path);
-      const accessDistance =
-        haversine(startLat, startLng, s.point.lat, s.point.lng) +
-        haversine(endLat, endLng, e.point.lat, e.point.lng);
-
-      const score = roadDistance + accessDistance;
-
-      if (!best || score < best.score) {
-        best = {
-          path,
-          startSnap: s.point,
-          endSnap: e.point,
-          distance: roadDistance + accessDistance,
-          score
-        };
-      }
-    }
-  }
-
-  return best;
-}
-
-/* Find the estate-road-connected end of an Entrance feature.
-   We deliberately do NOT infer inside/outside from node degree.
-   The endpoint closest to a NON-ENTRANCE estate road is the
-   estate-side endpoint. */
-function closestPointOnNonEntranceRoads(targetLat, targetLng) {
-  if (!roadData) return null;
-
-  const target = {lat: targetLat, lng: targetLng};
-  let best = null;
-
-  roadData.features.forEach(feature => {
-    if (!feature.geometry) return;
-
-    const attr = String(feature.properties?.Attribute || '').toLowerCase();
-    if (attr === 'entrance') return;
-
-    const geom = feature.geometry;
-    const lines =
-      geom.type === 'LineString' ? [geom.coordinates] :
-      geom.type === 'MultiLineString' ? geom.coordinates : [];
-
-    lines.forEach(coords => {
-      for (let i = 0; i < coords.length - 1; i++) {
-        const A = {lat: coords[i][1], lng: coords[i][0]};
-        const B = {lat: coords[i + 1][1], lng: coords[i + 1][0]};
-        const point = closestPointOnSegment(A, B, target);
-        const distance = haversine(targetLat, targetLng, point.lat, point.lng);
-
-        if (!best || distance < best.distance) {
-          best = {point, distance};
-        }
-      }
-    });
-  });
-
-  return best;
 }
 
 /* ==========================================================
@@ -2198,25 +2209,59 @@ function routeBetweenPlotCorners(
   startCorner,
   endCorner
 ) {
-  const result = routeBetweenWaypointCandidates(
-    startCorner[1], startCorner[0],
-    endCorner[1], endCorner[0]
-  );
 
-  if (!result) {
+  const startSnap =
+    closestPointOnRoads(
+      startCorner[1],
+      startCorner[0]
+    );
+
+  const endSnap =
+    closestPointOnRoads(
+      endCorner[1],
+      endCorner[0]
+    );
+
+  if (!startSnap || !endSnap)
     return {
-      path: null,
-      distance: 0,
-      startSnap: null,
-      endSnap: null
+      path:null,
+      distance:0,
+      startSnap:null,
+      endSnap:null
     };
-  }
+
+  const startNode = snapPointToGraph(startSnap);
+
+  const endNode = snapPointToGraph(endSnap);
+
+  if (!startNode || !endNode)
+    return {
+      path:null,
+      distance:0,
+      startSnap:startSnap.point,
+      endSnap:endSnap.point
+    };
+
+  const path =
+    AStar(
+      startNode,
+      endNode
+    );
+
+  if (!path)
+    return {
+      path:null,
+      distance:0,
+      startSnap:startSnap.point,
+      endSnap:endSnap.point
+    };
 
   return {
-    path: result.path,
-    distance: result.distance,
-    startSnap: result.startSnap,
-    endSnap: result.endSnap
+    path,
+    distance:
+      calculatePathDistance(path),
+    startSnap:startSnap.point,
+    endSnap:endSnap.point
   };
 }
 
@@ -2270,7 +2315,9 @@ function drawCornerAccess(
 ========================================================== */
 async function routeThroughAllCorners(
   best,
-  corners
+  corners,
+  startNode = null,
+  startLabel = null
 ) {
 
   if (!corners || corners.length < 3) {
@@ -2300,44 +2347,20 @@ async function routeThroughAllCorners(
       'Could not connect Corner 1 to the estate road.'
     );
 
-  const firstCandidates = roadPointCandidates(
-    best.entrance.inside.lat,
-    best.entrance.inside.lng,
-    30,
-    10
-  );
+  const routeStartNode =
+    startNode ||
+    closestGraphNode(
+      best.entrance.outside.lat,
+      best.entrance.outside.lng
+    ).node;
 
-  let firstPath = null;
-  let entranceNode = null;
-  let firstChosenSnap = null;
+  const firstNode = snapPointToGraph(firstSnap);
 
-  const firstCornerCandidates = roadPointCandidates(
-    firstCorner[1],
-    firstCorner[0],
-    50,
-    14
-  );
-
-  for (const sc of firstCandidates) {
-    const sNode = snapPointToGraph(sc);
-    if (!sNode) continue;
-
-    for (const ec of firstCornerCandidates) {
-      const eNode = snapPointToGraph(ec);
-      if (!eNode) continue;
-
-      const p = AStar(sNode, eNode);
-      if (p) {
-        firstPath = p;
-        entranceNode = sNode;
-        firstChosenSnap = ec.point;
-        break;
-      }
-    }
-    if (firstPath) break;
-  }
-
-  const firstNode = firstPath ? firstPath[firstPath.length - 1] : null;
+  const firstPath =
+    AStar(
+      routeStartNode,
+      firstNode
+    );
 
   if (!firstPath)
     throw new Error(
@@ -2369,7 +2392,7 @@ async function routeThroughAllCorners(
   routeLayers.push(firstLine);
 
   drawCornerAccess(
-    firstChosenSnap || firstSnap.point,
+    firstSnap.point,
     firstCorner
   );
 
@@ -2377,7 +2400,7 @@ async function routeThroughAllCorners(
     allDirections.concat(
       buildEstateDirections(
         firstPath,
-        `Enter the estate at ${best.entrance.name}`
+        startLabel || `Enter the estate at ${best.entrance.name}`
       )
     );
 
@@ -2417,9 +2440,7 @@ async function routeThroughAllCorners(
       console.warn(
         `Could not route Corner ${i + 1} to Corner ${i + 2}`
       );
-      throw new Error(
-        `No connected estate-road path between Plot Corner ${i + 1} and Plot Corner ${i + 2}.`
-      );
+      continue;
     }
 
     const coords =
@@ -2569,6 +2590,9 @@ function clearRoute() {
      new route is drawn, via finishRouteCycle(). */
   stopRouteTracking();
   currentRoutePolyline = [];
+  publicRouteLine = null;
+  publicRouteCoords = [];
+  publicRouteProgressIndex = 0;
 }
 
 /*
@@ -2579,9 +2603,7 @@ function clearRoute() {
 */
 function fullyClearRoute() {
   clearRoute();
-  lastRoutedCoord = null;
-}function fullyClearRoute() {
-  clearRoute();
+  stopLiveUserLocation();
   lastRoutedCoord = null;
 }
 
@@ -2644,7 +2666,7 @@ fetch('A13_Road.json')
 
     if (!r.ok)
       throw new Error(
-        'A13_Road(1).json could not be loaded'
+        'A0_Roads file could not be loaded'
       );
 
     return r.json();
@@ -2697,7 +2719,7 @@ fetch('A13.json')
 
     if (!r.ok)
       throw new Error(
-        'A14.json could not be loaded'
+        'A13.json could not be loaded'
       );
 
     return r.json();
@@ -2796,7 +2818,7 @@ fetch('A13.json')
     console.error(err);
 
     alert(
-      'Error loading A14.json – please use Live Server.'
+      'Error loading A13.json – please use Live Server.'
     );
 
   });
@@ -3036,6 +3058,209 @@ document.getElementById(
   }
 );
 
+
+/* ==========================================================
+   LIVE ROUTE PROGRESS
+
+   The active blue public-road route is shortened as the user
+   moves. The travelled section is removed; only the remaining
+   route is displayed.
+========================================================== */
+function closestPointOnPolyline(lat, lng, coords, startIndex = 0) {
+  if (!coords || coords.length < 2) return null;
+
+  let best = null;
+  let bestDistance = Infinity;
+  let bestIndex = startIndex;
+
+  for (let i = Math.max(0, startIndex); i < coords.length - 1; i++) {
+    const A = {lat: coords[i][0], lng: coords[i][1]};
+    const B = {lat: coords[i+1][0], lng: coords[i+1][1]};
+    const P = {lat, lng};
+    const pt = closestPointOnSegment(A, B, P);
+    const d = haversine(lat, lng, pt.lat, pt.lng);
+
+    if (d < bestDistance) {
+      bestDistance = d;
+      best = pt;
+      bestIndex = i;
+    }
+  }
+
+  return best ? {point:best, distance:bestDistance, index:bestIndex} : null;
+}
+
+function updateRemainingPublicRoute(lat, lng) {
+  if (!publicRouteLine || publicRouteCoords.length < 2) return;
+
+  const match = closestPointOnPolyline(
+    lat, lng, publicRouteCoords, publicRouteProgressIndex
+  );
+
+  if (!match) return;
+
+  /* Only advance forward along the route. This prevents a noisy GPS
+     reading from making the blue line jump backwards. */
+  if (match.index < publicRouteProgressIndex) return;
+
+  publicRouteProgressIndex = match.index;
+
+  const remaining = [
+    [match.point.lat, match.point.lng],
+    ...publicRouteCoords.slice(match.index + 1)
+  ];
+
+  if (remaining.length < 2) {
+    publicRouteLine.setLatLngs([]);
+    return;
+  }
+
+  publicRouteLine.setLatLngs(remaining);
+}
+
+/* ==========================================================
+   LIVE USER LOCATION
+========================================================== */
+function calculateMovementBearing(lat1, lng1, lat2, lng2) {
+  const toRad = Math.PI / 180;
+  const toDeg = 180 / Math.PI;
+
+  const phi1 = lat1 * toRad;
+  const phi2 = lat2 * toRad;
+  const dLng = (lng2 - lng1) * toRad;
+
+  const y = Math.sin(dLng) * Math.cos(phi2);
+  const x =
+    Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(dLng);
+
+  return (Math.atan2(y, x) * toDeg + 360) % 360;
+}
+
+function smoothMovementHeading(oldHeading, newHeading, factor = 0.35) {
+  let diff = ((newHeading - oldHeading + 540) % 360) - 180;
+  return (oldHeading + diff * factor + 360) % 360;
+}
+
+function createLiveUserMarker(lat, lng) {
+  const icon = L.divIcon({
+    className: '',
+    html: `
+      <div class="gps-location-marker">
+        <div class="gps-direction"></div>
+        <div class="gps-dot"></div>
+      </div>
+    `,
+    iconSize: [72, 72],
+    iconAnchor: [36, 36]
+  });
+
+  if (!userMarker) {
+    userMarker = L.marker([lat, lng], {
+      icon: icon,
+      zIndexOffset: 1000,
+      interactive: true
+    }).addTo(map).bindPopup('<strong>Your Location</strong>');
+  } else {
+    userMarker.setLatLng([lat, lng]);
+  }
+
+  updateMovementCone(movementHeading);
+}
+
+function updateMovementCone(heading) {
+  const cone = document.querySelector('.gps-direction');
+  if (!cone) return;
+
+  cone.style.transform =
+    `translate(-50%,-100%) rotate(${heading}deg)`;
+}
+
+function updateLiveUserLocation(position) {
+  const lat = position.coords.latitude;
+  const lng = position.coords.longitude;
+  const accuracy = position.coords.accuracy;
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+  if (previousUserLat !== null && previousUserLng !== null) {
+    const moved = haversine(
+      previousUserLat,
+      previousUserLng,
+      lat,
+      lng
+    );
+
+    if (moved >= MOVEMENT_THRESHOLD_METERS) {
+      const newHeading = calculateMovementBearing(
+        previousUserLat,
+        previousUserLng,
+        lat,
+        lng
+      );
+
+      movementHeading =
+        smoothMovementHeading(
+          movementHeading,
+          newHeading,
+          0.45
+        );
+    }
+  }
+
+  previousUserLat = lat;
+  previousUserLng = lng;
+
+  createLiveUserMarker(lat, lng);
+
+  /* Shorten the active blue route to the remaining section. */
+  updateRemainingPublicRoute(lat, lng);
+
+  if (!accuracyCircle) {
+    accuracyCircle = L.circle([lat, lng], {
+      radius: accuracy,
+      color: '#3388ff',
+      fillColor: '#3388ff',
+      fillOpacity: 0.12,
+      weight: 1
+    }).addTo(map);
+  } else {
+    accuracyCircle.setLatLng([lat, lng]);
+    accuracyCircle.setRadius(accuracy);
+  }
+}
+
+function startLiveUserLocation() {
+  if (!navigator.geolocation) return;
+
+  if (userLocationWatchId !== null) {
+    navigator.geolocation.clearWatch(userLocationWatchId);
+  }
+
+  userLocationWatchId =
+    navigator.geolocation.watchPosition(
+      updateLiveUserLocation,
+      error => {
+        console.warn('Live location error:', error);
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 20000
+      }
+    );
+}
+
+function stopLiveUserLocation() {
+  if (userLocationWatchId !== null) {
+    navigator.geolocation.clearWatch(userLocationWatchId);
+    userLocationWatchId = null;
+  }
+
+  previousUserLat = null;
+  previousUserLng = null;
+}
+
 /* ==========================================================
    MAIN ROUTING FUNCTION
 ========================================================== */
@@ -3074,6 +3299,8 @@ async function(coord) {
   lastRoutedCoord = coord;
 
   clearRoute();
+
+  startLiveUserLocation();
 
   showLoading(
     'Requesting your location...'
@@ -3177,130 +3404,228 @@ async function(coord) {
         const accuracy =
           position.coords.accuracy;
 
-        /* User marker */
-        userMarker =
-          L.marker(
-            [userLat,userLng],
-            {
-              icon:L.icon({
+        /* Live user marker */
+        createLiveUserMarker(userLat, userLng);
 
-                iconUrl:
-                  'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
-
-                shadowUrl:
-                  'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-
-                iconSize:[25,41],
-
-                iconAnchor:[12,41]
-
-              })
-            }
-          )
-          .addTo(map)
-          .bindPopup(
-            '<strong>Your Location</strong>'
-          );
+        /* Shorten the active blue route as soon as the first GPS fix arrives. */
+        updateRemainingPublicRoute(userLat, userLng);
 
         /* Accuracy circle */
-        accuracyCircle =
-          L.circle(
-            [userLat,userLng],
-            {
-              radius:accuracy,
-              color:'#3388ff',
-              fillColor:'#3388ff',
-              fillOpacity:0.12,
-              weight:1
-            }
-          ).addTo(map);
+        if (!accuracyCircle) {
+          accuracyCircle =
+            L.circle(
+              [userLat,userLng],
+              {
+                radius:accuracy,
+                color:'#3388ff',
+                fillColor:'#3388ff',
+                fillOpacity:0.12,
+                weight:1
+              }
+            ).addTo(map);
+        } else {
+          accuracyCircle.setLatLng([userLat,userLng]);
+          accuracyCircle.setRadius(accuracy);
+        }
 
         const plotLng=coord[0];
         const plotLat=coord[1];
 
-        showLoading(
-          'Checking all estate entrances...'
-        );
+        /* ==================================================
+           ROUTING MODE
 
-        showNavigationInfo(
-          routeUsingCorners
-            ? `Comparing all estate entrances for the ${corners.length} plot corners...`
-            : 'Comparing all estate entrances...'
-        );
+           Outside the estate: keep the original public-road
+           + estate-road routing through the best entrance.
 
-        /*
-           The original entrance-selection
-           system is preserved.
+           Inside the estate: ignore OSRM/public roads entirely
+           and route only on the actual estate-road graph.
+        ================================================== */
+        const insideEstate =
+          isUserInsideEstate(userLat, userLng);
 
-           We initially use Corner 1 as
-           the destination when selecting
-           the best entrance.
-        */
-        const routingDestination =
-          routeUsingCorners
-            ? corners[0]
-            : coord;
+        let result = null;
+        let best = null;
+        let publicCoords = [];
+        let estateCoords = [];
+        let estateDirections = [];
+        let estateOnlyDistance = 0;
+        let startEstateNode = null;
 
-        const result =
-          await evaluateAllEntrances(
-            userLat,
-            userLng,
-            routingDestination[1],
-            routingDestination[0]
+        if (insideEstate) {
+
+          showLoading(
+            'You are inside the estate. Routing on estate roads only...'
           );
 
-        const best=result.best;
-
-        console.log(
-          'BEST ENTRANCE:',
-          best.entrance.name
-        );
-
-        console.log(
-          'Plot corners:',
-          corners
-        );
-
-        console.table(
-          result.all.map(r => ({
-
-            Entrance:r.entrance.name,
-
-            Public:
-              (r.publicDistance/1000)
-                .toFixed(2)+' km',
-
-            Estate:
-              (r.estateDistance/1000)
-                .toFixed(2)+' km',
-
-            Total:
-              (r.totalDistance/1000)
-                .toFixed(2)+' km'
-
-          }))
-        );
-
-        /* ==================================================
-           PUBLIC ROAD ROUTE
-        ================================================== */
-        showLoading(
-          'Drawing public-road route...'
-        );
-
-        const publicCoords =
-          drawPublicRoute(
-            best.publicRoute
+          showNavigationInfo(
+            routeUsingCorners
+              ? `Estate-only route through all ${corners.length} plot corners.`
+              : 'Estate-only route to your destination.'
           );
 
-        /* ==================================================
-           ESTATE ROUTE
-        ================================================== */
+          const userRoadSnap =
+            closestPointOnRoads(userLat, userLng);
 
-        let estateCoords=[];
-        let estateDirections=[];
+          if (!userRoadSnap)
+            throw new Error('Could not snap your location to the estate roads.');
 
-        if (routeUsingCorners) {
+          startEstateNode =
+            snapPointToGraph(userRoadSnap);
+
+          if (!startEstateNode)
+            throw new Error('Could not connect your location to the estate road network.');
+
+          const routingDestination =
+            routeUsingCorners
+              ? corners[0]
+              : coord;
+
+          const destinationSnap =
+            closestPointOnRoads(
+              routingDestination[1],
+              routingDestination[0]
+            );
+
+          if (!destinationSnap)
+            throw new Error('Could not find the destination on the estate roads.');
+
+          const destinationNode =
+            snapPointToGraph(destinationSnap);
+
+          if (!destinationNode)
+            throw new Error('Could not connect the destination to the estate road network.');
+
+          const estatePath =
+            AStar(
+              startEstateNode,
+              destinationNode
+            );
+
+          if (!estatePath)
+            throw new Error('No estate-road route could be calculated from your current location.');
+
+          if (!routeUsingCorners) {
+
+            estateCoords =
+              drawAStarRoute(
+                estatePath,
+                destinationSnap.point
+              );
+
+            drawPlotAccess(
+              destinationSnap.point,
+              plotLat,
+              plotLng
+            );
+
+            estateDirections =
+              buildEstateDirections(
+                estatePath,
+                'Continue on estate roads'
+              );
+
+            estateDirections.push({
+              instruction: 'Arrive at your destination',
+              distance: 0,
+              isCornerArrival: true,
+              location: { lat: plotLat, lng: plotLng }
+            });
+
+            estateOnlyDistance =
+              calculatePathDistance(estatePath);
+
+          } else {
+
+            showLoading(
+              `Finding the shortest corner order from your location...`
+            );
+
+            corners =
+              await orderCornersNearestNeighbor(
+                startEstateNode,
+                corners
+              );
+
+            selectedPlotCorners = corners;
+            drawCornerMarkers(corners);
+
+            showLoading(
+              `Routing through all ${corners.length} plot corners...`
+            );
+
+            const cornerRoute =
+              await routeThroughAllCorners(
+                { entrance: { name: 'your current location' } },
+                corners,
+                startEstateNode,
+                'Start from your current location'
+              );
+
+            estateCoords = cornerRoute.coords;
+            estateDirections = cornerRoute.directions;
+
+            estateOnlyDistance =
+              calculatePolylineDistance(estateCoords);
+          }
+
+          console.log('NAVIGATION MODE: ESTATE ONLY');
+
+        } else {
+
+          showLoading(
+            'Checking all estate entrances...'
+          );
+
+          showNavigationInfo(
+            routeUsingCorners
+              ? `Comparing all estate entrances for the ${corners.length} plot corners...`
+              : 'Comparing all estate entrances...'
+          );
+
+          const routingDestination =
+            routeUsingCorners
+              ? corners[0]
+              : coord;
+
+          result =
+            await evaluateAllEntrances(
+              userLat,
+              userLng,
+              routingDestination[1],
+              routingDestination[0]
+            );
+
+          best=result.best;
+
+          console.log(
+            'BEST ENTRANCE:',
+            best.entrance.name
+          );
+
+          console.log(
+            'Plot corners:',
+            corners
+          );
+
+          console.table(
+            result.all.map(r => ({
+              Entrance:r.entrance.name,
+              Public:(r.publicDistance/1000).toFixed(2)+' km',
+              Estate:(r.estateDistance/1000).toFixed(2)+' km',
+              Total:(r.totalDistance/1000).toFixed(2)+' km'
+            }))
+          );
+
+          showLoading(
+            'Drawing public-road route...'
+          );
+
+          publicCoords =
+            drawPublicRoute(
+              best.publicRoute
+            );
+
+          if (routeUsingCorners) {
 
           showLoading(
             'Finding the shortest corner order...'
@@ -3369,23 +3694,28 @@ async function(coord) {
             isCornerArrival: true,
             location: { lat: plotLat, lng: plotLng }
           });
+
+          }
+
         }
 
         /* ==================================================
            ENTRANCE MARKER
         ================================================== */
-        entranceMarker =
-          L.marker(
-            [
-              best.entrance.outside.lat,
-              best.entrance.outside.lng
-            ]
-          )
-          .addTo(map)
-          .bindPopup(
-            `<strong>${best.entrance.name}</strong>
-             <br>Best entrance for this destination`
-          );
+        if (!insideEstate && best) {
+          entranceMarker =
+            L.marker(
+              [
+                best.entrance.outside.lat,
+                best.entrance.outside.lng
+              ]
+            )
+            .addTo(map)
+            .bindPopup(
+              `<strong>${best.entrance.name}</strong>
+               <br>Best entrance for this destination`
+            );
+        }
 
         /* ==================================================
            CORNER DESTINATION MARKERS
@@ -3512,10 +3842,11 @@ async function(coord) {
         ================================================== */
 
         let totalDistance =
-          best.publicDistance +
-          best.estateDistance;
+          insideEstate
+            ? estateOnlyDistance
+            : best.publicDistance + best.estateDistance;
 
-        if (routeUsingCorners) {
+        if (routeUsingCorners && !insideEstate) {
 
           /*
              Add the A* distances between
@@ -3542,10 +3873,14 @@ async function(coord) {
         }
 
         showNavigationInfo(
-          routeUsingCorners
-            ? `Route calculated through all ${corners.length} plot corners.`
-            : 'Route calculated successfully.',
-          best.entrance.name,
+          insideEstate
+            ? (routeUsingCorners
+                ? `Estate-only route calculated through all ${corners.length} plot corners.`
+                : 'Estate-only route calculated successfully.')
+            : (routeUsingCorners
+                ? `Route calculated through all ${corners.length} plot corners.`
+                : 'Route calculated successfully.'),
+          insideEstate ? 'Estate roads only' : best.entrance.name,
           totalDistance
         );
 
@@ -3553,7 +3888,9 @@ async function(coord) {
            TURN-BY-TURN DIRECTIONS
         ================================================== */
         const publicDirections =
-          formatOsrmSteps(best.publicRoute);
+          insideEstate
+            ? []
+            : formatOsrmSteps(best.publicRoute);
 
         const combinedDirections =
           publicDirections.concat(estateDirections);
@@ -3636,6 +3973,8 @@ window.addEventListener(
     setTimeout(() => {
 
       if (navigator.geolocation) {
+
+        startLiveUserLocation();
 
         navigator.geolocation.getCurrentPosition(
           () => {},
