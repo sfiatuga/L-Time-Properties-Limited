@@ -6,7 +6,7 @@
 <title>ELIZ COURT | L-Time Properties</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="https://unpkg.com/@tomickigrzegorz/leaflet-rotate/dist/leaflet-rotate.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate.css">
 
 <style>
 *{ margin:0; padding:0; box-sizing:border-box; }
@@ -283,7 +283,6 @@ body{
   width:300px;
   max-width:calc(100vw - 24px);
   display:none;
-  transition:transform .28s ease, opacity .28s ease;
 }
 .navigation-info h3{
   color:#003366;
@@ -295,54 +294,6 @@ body{
   margin:4px 0;
   line-height:1.35;
   color:#333;
-}
-
-
-/* ==========================================================
-   MOBILE NAVIGATION MODE
-   When voice guidance starts, the navigation panel slides
-   completely off-screen so it does not cover the map.
-========================================================== */
-.navigation-info.voice-navigation-collapsed{
-  transform:translateX(calc(100% + 30px));
-  opacity:0;
-  pointer-events:none;
-}
-
-@media (max-width: 700px){
-  .navigation-info{
-    top:86px;
-    right:8px;
-    width:min(300px, calc(100vw - 16px));
-    max-height:calc(100vh - 105px);
-    overflow-y:auto;
-  }
-
-  .navigation-info.voice-navigation-collapsed{
-    transform:translateX(calc(100% + 25px));
-  }
-
-  /* Small floating button used to restore the panel during voice guidance. */
-  #showNavigationPanelBtn{
-    position:absolute;
-    top:86px;
-    right:8px;
-    z-index:1001;
-    display:none;
-    border:none;
-    border-radius:22px;
-    padding:9px 13px;
-    background:#003366;
-    color:#fff;
-    font-size:12px;
-    font-weight:700;
-    box-shadow:0 3px 12px rgba(0,0,0,.25);
-    cursor:pointer;
-  }
-
-  #showNavigationPanelBtn.visible{
-    display:block;
-  }
 }
 
 /* ==========================================================
@@ -581,36 +532,59 @@ body{
 }
 
 
-.back-btn{
-  background:#e53935 !important;
-  background-color:#e53935 !important;
-  color:#ffffff !important;
-  border:none !important;
+/* ==========================================================
+   MOBILE VOICE NAVIGATION PANEL
+   The large directions panel slides away only when voice
+   guidance is enabled on a small screen.
+========================================================== */
+@media (max-width:700px){
+  .navigation-info{
+    transition:transform .28s ease, opacity .28s ease;
+    max-height:calc(100vh - 145px);
+    overflow-y:auto;
+  }
+
+  .navigation-info.voice-navigation-collapsed{
+    transform:translateX(calc(100% + 25px));
+    opacity:0;
+    pointer-events:none;
+  }
+
+  #showNavigationPanelBtn{
+    position:fixed;
+    top:133px;
+    right:10px;
+    z-index:2001;
+    display:none;
+    border:0;
+    border-radius:20px;
+    padding:9px 13px;
+    background:#003366;
+    color:#fff;
+    font-size:12px;
+    font-weight:700;
+    box-shadow:0 3px 12px rgba(0,0,0,.28);
+    cursor:pointer;
+  }
+
+  #showNavigationPanelBtn.visible{
+    display:block;
+  }
 }
 
-/* ===== RESTORE NAVIGATION BACK BUTTON ===== */
-.navigation-info .back-btn,
-#navigationInfo .back-btn {
-  display:inline-flex !important;
-  align-items:center !important;
-  justify-content:center !important;
-  background:#e53935 !important;
-  background-color:#e53935 !important;
+/* Keep the existing header navigation button red. */
+.header .header-buttons button:not(.secondary){
+  background:#dc3545 !important;
   color:#fff !important;
-  border:0 !important;
+  border:none !important;
+  padding:9px 15px !important;
   border-radius:6px !important;
-  min-height:40px !important;
-  padding:10px 16px !important;
-  font-size:14px !important;
-  font-weight:700 !important;
-  width:auto !important;
-  min-width:100px !important;
-  box-sizing:border-box !important;
+  font-size:13px !important;
+  font-weight:bold !important;
 }
-.navigation-info .back-btn:hover,
-#navigationInfo .back-btn:hover {
-  background:#c62828 !important;
-  background-color:#c62828 !important;
+.header .header-buttons button:not(.secondary):hover{
+  background:#c82333 !important;
+  color:#fff !important;
 }
 
 </style>
@@ -686,7 +660,7 @@ body{
   <div class="directions-list" id="directionsList"></div>
 </div>
 
-<!-- Mobile: restore navigation panel while voice guidance is active -->
+<!-- Small mobile control used when the navigation panel is collapsed -->
 <button id="showNavigationPanelBtn" onclick="showNavigationPanel()">☰ Navigation</button>
 
 <!-- Loading overlay -->
@@ -703,7 +677,7 @@ body{
 </div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/@tomickigrzegorz/leaflet-rotate/dist/leaflet-rotate.umd.min.js"></script>
+<script src="https://unpkg.com/leaflet-rotate@0.2.8/dist/leaflet-rotate.js"></script>
 
 <script>
 /* ==========================================================
@@ -711,18 +685,14 @@ body{
 ========================================================== */
 const map = L.map('map', {
   rotate: true,
-  bearing: 0,
-  dragRotate: true,
   touchRotate: true,
   shiftKeyRotate: true,
-  rotateClockwise: true,
   dragging: true,
   scrollWheelZoom: true,
   doubleClickZoom: true,
   boxZoom: true,
   keyboard: true,
-  zoomControl: true,
-  rotateControl: { position: 'topleft', behavior: 'reset', closeOnZeroBearing: false }
+  zoomControl: true
 }).setView([5.9348, 0.1933], 18);
 
 /* Explicitly keep all normal Leaflet interactions enabled. */
@@ -733,7 +703,7 @@ map.boxZoom.enable();
 map.keyboard.enable();
 
 /* North/reset button for the rotatable map. */
-const rotateResetControl = L.control({position:'bottomleft'});
+const rotateResetControl = L.control({position:'topleft'});
 rotateResetControl.onAdd = function(){
   const div = L.DomUtil.create('div','leaflet-bar leaflet-rotate-reset');
   const a = L.DomUtil.create('a','',div);
@@ -1995,7 +1965,7 @@ function collapseNavigationPanelForVoice() {
 
   if (!panel) return;
 
-  if (window.matchMedia('(max-width: 700px)').matches) {
+  if (window.matchMedia('(max-width:700px)').matches) {
     panel.classList.add('voice-navigation-collapsed');
     if (restoreBtn) restoreBtn.classList.add('visible');
   }
@@ -2005,13 +1975,11 @@ function showNavigationPanel() {
   const panel = document.getElementById('navigationInfo');
   const restoreBtn = document.getElementById('showNavigationPanelBtn');
 
-  if (!panel) return;
-
-  panel.classList.remove('voice-navigation-collapsed');
+  if (panel) panel.classList.remove('voice-navigation-collapsed');
   if (restoreBtn) restoreBtn.classList.remove('visible');
 }
 
-function restoreNavigationPanelAfterVoice() {
+function restoreNavigationPanel() {
   const panel = document.getElementById('navigationInfo');
   const restoreBtn = document.getElementById('showNavigationPanelBtn');
 
@@ -2054,13 +2022,11 @@ function startVoiceGuidance() {
       { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 }
     );
 
-  /* Auto-reroute is only meaningful while actively
-     navigating - tie it to voice guidance rather than
-     leaving it running in the background any time a route
-     has ever been calculated. */
+  /* Automatic rerouting is intentionally tied to active
+     voice guidance. */
   startRouteTracking();
 
-  /* On phones, give the map the full screen once voice guidance begins. */
+  /* On mobile, hide the large directions panel. */
   collapseNavigationPanelForVoice();
 }
 
@@ -2091,12 +2057,10 @@ function stopVoiceGuidance() {
     .querySelectorAll('.direction-step.current-step')
     .forEach(el => el.classList.remove('current-step'));
 
-  /* Stop watching for off-route drift once guidance stops -
-     otherwise a route calculated once would keep silently
-     triggering reroutes in the background indefinitely. */
   stopRouteTracking();
-  restoreNavigationPanelAfterVoice();
-  zoomToUserAfterReroute = false;
+
+  /* When voice is disabled, return the panel. */
+  restoreNavigationPanel();
 }
 
 function lowercaseFirst(text) {
@@ -2205,18 +2169,22 @@ function onVoicePositionError(error) {
    whole route is silently recalculated from their current
    position to the same destination.
 ========================================================== */
-const REROUTE_DISTANCE_THRESHOLD = 35; // metres off-route before checking for reroute
+const REROUTE_DISTANCE_THRESHOLD = 35; // metres off route
 const REROUTE_COOLDOWN_MS = 15000;      // minimum gap between reroutes
-const REROUTE_MIN_MOVEMENT_METERS = 8;  // ignore tiny GPS/map-position noise
-const REROUTE_REQUIRED_OFF_ROUTE_FIXES = 3; // require several bad GPS fixes
-const REROUTE_MAX_ACCURACY_METERS = 35; // ignore unreliable GPS fixes
+const REROUTE_MIN_MOVEMENT_METERS = 8;  // ignore GPS jitter
+const REROUTE_REQUIRED_OFF_ROUTE_FIXES = 3;
+const REROUTE_MAX_ACCURACY_METERS = 35;
 
 let routeTrackWatchId = null;
 let isRerouting = false;
 let lastRerouteTime = 0;
 let resumeVoiceAfterReroute = false;
-let zoomToUserAfterReroute = false;
 
+/* Position saved when an automatic reroute is triggered. */
+let rerouteUserLat = null;
+let rerouteUserLng = null;
+
+/* State used to require genuine movement and repeated off-route fixes. */
 let rerouteLastLat = null;
 let rerouteLastLng = null;
 let consecutiveOffRouteFixes = 0;
@@ -2241,7 +2209,7 @@ function distanceToPolyline(lat, lng, coords) {
   return best;
 }
 
-function resetRerouteMovementState() {
+function resetRerouteState() {
   rerouteLastLat = null;
   rerouteLastLng = null;
   consecutiveOffRouteFixes = 0;
@@ -2250,8 +2218,15 @@ function resetRerouteMovementState() {
 function startRouteTracking() {
 
   stopRouteTracking();
-  resetRerouteMovementState();
+  resetRerouteState();
 
+  /*
+     IMPORTANT:
+     No background route watcher exists unless voice guidance
+     is actually active. Therefore zooming, panning or rotating
+     the map cannot by itself cause a route recalculation.
+  */
+  if (!voiceGuidanceActive) return;
   if (!navigator.geolocation) return;
 
   routeTrackWatchId =
@@ -2273,14 +2248,12 @@ function stopRouteTracking() {
     routeTrackWatchId = null;
   }
 
-  resetRerouteMovementState();
+  resetRerouteState();
 }
 
 function onRouteTrackPosition(position) {
 
-  /* Never reroute unless the user deliberately started voice navigation. */
   if (!voiceGuidanceActive) return;
-
   if (isRerouting) return;
   if (!currentRoutePolyline || currentRoutePolyline.length < 2) return;
 
@@ -2288,25 +2261,26 @@ function onRouteTrackPosition(position) {
   const userLng = position.coords.longitude;
   const accuracy = Number(position.coords.accuracy);
 
-  /* Bad GPS fixes can jump tens/hundreds of metres.
-     Ignore them instead of recalculating the route. */
+  if (!Number.isFinite(userLat) || !Number.isFinite(userLng)) return;
+
+  /* Ignore poor GPS fixes. */
   if (!Number.isFinite(accuracy) || accuracy > REROUTE_MAX_ACCURACY_METERS) {
     return;
   }
 
-  /* Map zooming, panning and rotating do not change these GPS coordinates.
-     We only use actual GPS displacement to decide whether to inspect route drift. */
+  /*
+     Only check after the user has actually moved at least 8 m.
+     Map interactions do not change these GPS coordinates.
+  */
   if (rerouteLastLat !== null && rerouteLastLng !== null) {
+    const moved = haversine(
+      rerouteLastLat,
+      rerouteLastLng,
+      userLat,
+      userLng
+    );
 
-    const movement =
-      haversine(
-        rerouteLastLat,
-        rerouteLastLng,
-        userLat,
-        userLng
-      );
-
-    if (movement < REROUTE_MIN_MOVEMENT_METERS) {
+    if (moved < REROUTE_MIN_MOVEMENT_METERS) {
       return;
     }
   }
@@ -2314,23 +2288,20 @@ function onRouteTrackPosition(position) {
   rerouteLastLat = userLat;
   rerouteLastLng = userLng;
 
-  const dist =
-    distanceToPolyline(
-      userLat,
-      userLng,
-      currentRoutePolyline
-    );
+  const dist = distanceToPolyline(
+    userLat,
+    userLng,
+    currentRoutePolyline
+  );
 
-  /* Back on route: clear any previous off-route readings. */
   if (dist <= REROUTE_DISTANCE_THRESHOLD) {
     consecutiveOffRouteFixes = 0;
     return;
   }
 
-  /* One GPS reading is not enough to trigger a reroute.
-     Require several consecutive readings while genuinely moving. */
   consecutiveOffRouteFixes++;
 
+  /* Do not reroute from a single bad GPS reading. */
   if (consecutiveOffRouteFixes < REROUTE_REQUIRED_OFF_ROUTE_FIXES) {
     return;
   }
@@ -2342,10 +2313,10 @@ function onRouteTrackPosition(position) {
   }
 
   consecutiveOffRouteFixes = 0;
-  triggerReroute();
+  triggerReroute(userLat, userLng);
 }
 
-function triggerReroute() {
+function triggerReroute(userLat, userLng) {
 
   if (!lastRoutedCoord || isRerouting) return;
   if (!voiceGuidanceActive) return;
@@ -2353,46 +2324,47 @@ function triggerReroute() {
   isRerouting = true;
   lastRerouteTime = Date.now();
 
+  /*
+     Save the exact GPS position that caused the reroute.
+     routeToPlot() clears/rebuilds the route, so this value is
+     kept separately until the new route has successfully drawn.
+  */
+  rerouteUserLat = userLat;
+  rerouteUserLng = userLng;
+
   resumeVoiceAfterReroute = true;
-  zoomToUserAfterReroute = true;
 
   speak('You are off route. Recalculating.');
   showNavigationInfo('You went off route - recalculating...');
 
-  /* routeToPlot() gets a fresh GPS fix and rebuilds the route. */
   window.routeToPlot(lastRoutedCoord);
 }
 
-/*
-   Called once a routeToPlot() cycle finishes.
-   IMPORTANT: simply calculating/viewing a route does NOT start
-   background rerouting. Route tracking is started only by
-   Enable Voice Guidance.
-*/
+function zoomToUserAfterReroute() {
 
-function zoomToCurrentUserAfterReroute() {
-  if (!zoomToUserAfterReroute) return;
+  if (rerouteUserLat === null || rerouteUserLng === null) return;
+  if (!map) return;
 
-  const lat = Number(previousUserLat);
-  const lng = Number(previousUserLng);
-
-  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !map) {
-    return;
-  }
-
-  const targetZoom = window.matchMedia('(max-width: 700px)').matches ? 19 : 18;
+  const zoom =
+    window.matchMedia('(max-width:700px)').matches
+      ? 19
+      : 18;
 
   /*
-     One-shot reposition only. This does not start a follow mode,
-     does not alter map bearing/rotation, and does not run on manual
-     zoom, pan, or rotate.
+     One-shot reposition only.
+     It does not enable follow mode and does not reset bearing.
   */
-  map.setView([lat, lng], targetZoom, {
-    animate: true,
-    duration: 0.7
-  });
+  map.setView(
+    [rerouteUserLat, rerouteUserLng],
+    zoom,
+    {
+      animate: true,
+      duration: 0.7
+    }
+  );
 
-  zoomToUserAfterReroute = false;
+  rerouteUserLat = null;
+  rerouteUserLng = null;
 }
 
 function finishRouteCycle(success) {
@@ -2402,16 +2374,21 @@ function finishRouteCycle(success) {
   if (!success) {
     currentRoutePolyline = [];
     stopRouteTracking();
-    zoomToUserAfterReroute = false;
-  } else {
-    zoomToCurrentUserAfterReroute();
+    rerouteUserLat = null;
+    rerouteUserLng = null;
   }
 
+  /*
+     IMPORTANT:
+     A normal route calculation does NOT start route tracking.
+     Only startVoiceGuidance() starts it.
+  */
   if (resumeVoiceAfterReroute) {
+
     resumeVoiceAfterReroute = false;
 
-    if (success && voiceGuidanceActive) {
-      /* startVoiceGuidance() starts both voice GPS and reroute tracking. */
+    if (success) {
+      zoomToUserAfterReroute();
       startVoiceGuidance();
     }
   }
@@ -2800,8 +2777,6 @@ function clearRoute() {
   const voiceBtn = document.getElementById('voiceToggleBtn');
   if (voiceBtn) voiceBtn.style.display = 'none';
 
-  restoreNavigationPanelAfterVoice();
-
   /* Route tracking is stopped here too - routeToPlot()
      (including an automatic reroute) restarts it once the
      new route is drawn, via finishRouteCycle(). */
@@ -2810,6 +2785,16 @@ function clearRoute() {
   publicRouteLine = null;
   publicRouteCoords = [];
   publicRouteProgressIndex = 0;
+
+  /* If this is a normal clear, cancel any saved reroute target.
+     During an automatic reroute, preserve it until the new route
+     has successfully completed. */
+  if (!isRerouting) {
+    rerouteUserLat = null;
+    rerouteUserLng = null;
+  }
+
+  restoreNavigationPanel();
 }
 
 /*
@@ -2822,6 +2807,11 @@ function fullyClearRoute() {
   clearRoute();
   stopLiveUserLocation();
   lastRoutedCoord = null;
+  isRerouting = false;
+  resumeVoiceAfterReroute = false;
+  rerouteUserLat = null;
+  rerouteUserLng = null;
+  restoreNavigationPanel();
 }
 
 function backToEstates() {
@@ -2878,7 +2868,7 @@ function showNavigationInfo(
 /* ==========================================================
    LOAD ROADS
 ========================================================== */
-fetch('A11_Road.json')
+fetch('A12_Road.json')
   .then(r => {
 
     if (!r.ok)
@@ -2931,12 +2921,12 @@ fetch('A11_Road.json')
 /* ==========================================================
    LOAD PARCELS
 ========================================================== */
-fetch('A11.json')
+fetch('A12.json')
   .then(r => {
 
     if (!r.ok)
       throw new Error(
-        'A11.json could not be loaded'
+        'A12.json could not be loaded'
       );
 
     return r.json();
@@ -3035,7 +3025,7 @@ fetch('A11.json')
     console.error(err);
 
     alert(
-      'Error loading A11.json – please use Live Server.'
+      'Error loading A12.json – please use Live Server.'
     );
 
   });
