@@ -810,7 +810,8 @@ function isUserInsideEstate(userLat, userLng) {
 }
 
 
-const SNAP_TOLERANCE = 0.6;
+const SNAP_TOLERANCE = 1.5;
+const COMPONENT_CONNECT_TOLERANCE = 70;
 
 /* ==========================================================
    NEW: PARCEL DATA
@@ -883,28 +884,187 @@ function addGraphEdge(a, b) {
    BUILD GRAPH
 ========================================================== */
 function buildRoadGraph(data) {
+
   roadGraph = {};
   graphNodes = [];
 
+  /* ==========================================================
+     BUILD THE NORMAL ROAD GRAPH
+  ========================================================== */
+
   data.features.forEach(feature => {
+
     if (!feature.geometry) return;
+
     const geom = feature.geometry;
     let lines = [];
 
-    if (geom.type === 'LineString') lines = [geom.coordinates];
-    else if (geom.type === 'MultiLineString') lines = geom.coordinates;
+    if (geom.type === 'LineString') {
+      lines = [geom.coordinates];
+    }
+    else if (geom.type === 'MultiLineString') {
+      lines = geom.coordinates;
+    }
 
     lines.forEach(coords => {
+
       let prev = null;
+
       coords.forEach(c => {
-        const node = createGraphNode(c[1], c[0]);
-        if (prev) addGraphEdge(prev, node);
+
+        const node = createGraphNode(
+          c[1],
+          c[0]
+        );
+
+        if (prev) {
+          addGraphEdge(prev, node);
+        }
+
         prev = node;
       });
+
     });
+
   });
 
-  console.log('A* graph nodes:', graphNodes.length);
+
+  /* ==========================================================
+     CONNECT ROAD SECTIONS THAT ARE VERY CLOSE BUT WERE
+     EXPORTED AS SEPARATE GRAPH COMPONENTS
+     
+     This fixes small/disconnected sections in the road JSON
+     without changing the road data itself.
+  ========================================================== */
+
+  let connectionCount = 0;
+
+  while (true) {
+
+    const components = [];
+
+    const visited = new Set();
+
+    graphNodes.forEach(startNode => {
+
+      if (visited.has(startNode.id)) return;
+
+      const component = [];
+      const queue = [startNode];
+
+      visited.add(startNode.id);
+
+      while (queue.length) {
+
+        const current = queue.shift();
+
+        component.push(current);
+
+        current.neighbors.forEach(nb => {
+
+          if (!visited.has(nb.id)) {
+
+            visited.add(nb.id);
+
+            queue.push(
+              roadGraph[nb.id]
+            );
+
+          }
+
+        });
+
+      }
+
+      components.push(component);
+
+    });
+
+
+    /* Already one connected road network */
+    if (components.length <= 1) {
+      break;
+    }
+
+
+    /* ========================================================
+       FIND THE TWO CLOSEST COMPONENTS
+    ======================================================== */
+
+    let bestDistance = Infinity;
+    let bestA = null;
+    let bestB = null;
+
+    for (let i = 0; i < components.length; i++) {
+
+      for (let j = i + 1; j < components.length; j++) {
+
+        for (const nodeA of components[i]) {
+
+          for (const nodeB of components[j]) {
+
+            const distance = haversine(
+              nodeA.lat,
+              nodeA.lng,
+              nodeB.lat,
+              nodeB.lng
+            );
+
+            if (distance < bestDistance) {
+
+              bestDistance = distance;
+              bestA = nodeA;
+              bestB = nodeB;
+
+            }
+
+          }
+
+        }
+
+      }
+
+    }
+
+
+    /* ========================================================
+       ONLY CONNECT ROAD SECTIONS WITHIN THE SAFE LIMIT
+    ======================================================== */
+
+    if (
+      !bestA ||
+      !bestB ||
+      bestDistance > COMPONENT_CONNECT_TOLERANCE
+    ) {
+      break;
+    }
+
+
+    addGraphEdge(
+      bestA,
+      bestB
+    );
+
+    connectionCount++;
+
+    console.log(
+      'Connected road sections:',
+      bestDistance.toFixed(2),
+      'meters'
+    );
+
+  }
+
+
+  console.log(
+    'A* graph nodes:',
+    graphNodes.length
+  );
+
+  console.log(
+    'Road section connections added:',
+    connectionCount
+  );
 }
 
 /* ==========================================================
@@ -1262,7 +1422,9 @@ async function evaluateAllEntrances(
       'Could not connect plot to estate roads'
     );
 
-  let candidates = entranceData;
+  let candidates = entranceData.filter(
+  entrance => entrance.name === 'Entrance 1'
+);
 
   if (candidates.length === 0) {
     console.warn(
@@ -1297,11 +1459,16 @@ async function evaluateAllEntrances(
           entrance.outside.lng
         );
 
-      const entranceNode =
-        closestGraphNode(
-          entrance.outside.lat,
-          entrance.outside.lng
-        ).node;
+      const entranceSnap =
+  closestPointOnRoads(
+    entrance.outside.lat,
+    entrance.outside.lng
+  );
+
+const entranceNode =
+  snapPointToGraph(
+    entranceSnap
+  );
 
       const estatePath =
         AStar(
